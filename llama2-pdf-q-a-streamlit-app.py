@@ -1,107 +1,68 @@
-import json
 import os
+import tempfile
 import streamlit as st
-from cassandra.auth import PlainTextAuthProvider
-from cassandra.cluster import Cluster
-from llama_index import ServiceContext
+from llama_index import ServiceContext, VectorStoreIndex, SimpleDirectoryReader
 from llama_index import set_global_service_context
-from llama_index import VectorStoreIndex, SimpleDirectoryReader, StorageContext
 from llama_index.embeddings import GradientEmbedding
 from llama_index.llms import GradientBaseModelLLM
-from llama_index.vector_stores import CassandraVectorStore
-from copy import deepcopy
-from tempfile import NamedTemporaryFile
 
 @st.cache_resource
-def create_datastax_connection():
-
-    cloud_config= {'secure_connect_bundle': 'secure-connect-ankit-astra-test.zip'}
-
-    with open("ankit_astra_test-token.json") as f:
-        secrets = json.load(f)
-
-    CLIENT_ID = secrets["clientId"]
-    CLIENT_SECRET = secrets["secret"]
-
-    auth_provider = PlainTextAuthProvider(CLIENT_ID, CLIENT_SECRET)
-    cluster = Cluster(cloud=cloud_config, auth_provider=auth_provider)
-    astra_session = cluster.connect()
-    return astra_session
+def build_service_context():
+    llm = GradientBaseModelLLM(base_model_slug="llama2-7b-chat", max_tokens=400)
+    embed_model = GradientEmbedding(
+        gradient_access_token=os.environ.get("GRADIENT_ACCESS_TOKEN", ""),
+        gradient_workspace_id=os.environ.get("GRADIENT_WORKSPACE_ID", ""),
+        gradient_model_slug="bge-large")
+    svc = ServiceContext.from_defaults(llm=llm, embed_model=embed_model, chunk_size=256)
+    set_global_service_context(svc)
+    return svc
 
 def main():
-
-    index_placeholder = None
-    st.set_page_config(page_title = "Chat with your PDF using Llama2 & Llama Index", page_icon="🦙")
-    st.header('🦙 Chat with your PDF using Llama2 model & Llama Index')
-
-    if "conversation" not in st.session_state:
-        st.session_state.conversation = None
+    st.set_page_config(page_title="Chat with your PDF using Llama2 & Llama Index", page_icon="🦙")
+    st.header("🦙 Chat with your PDF using Llama2 model & Llama Index")
 
     if "activate_chat" not in st.session_state:
         st.session_state.activate_chat = False
-
     if "messages" not in st.session_state:
         st.session_state.messages = []
+    if "query_engine" not in st.session_state:
+        st.session_state.query_engine = None
 
     for message in st.session_state.messages:
-        with st.chat_message(message["role"], avatar = message['avatar']):
+        with st.chat_message(message["role"], avatar=message["avatar"]):
             st.markdown(message["content"])
 
-    session = create_datastax_connection()
-
-    os.environ['GRADIENT_ACCESS_TOKEN'] = "Enter your Token"
-    os.environ['GRADIENT_WORKSPACE_ID'] = "Enter your Workspace ID"
-
-    llm = GradientBaseModelLLM(base_model_slug="llama2-7b-chat", max_tokens=400)
-
-    embed_model = GradientEmbedding(
-        gradient_access_token = os.environ["GRADIENT_ACCESS_TOKEN"],
-        gradient_workspace_id = os.environ["GRADIENT_WORKSPACE_ID"],
-        gradient_model_slug="bge-large")
-
-    service_context = ServiceContext.from_defaults(
-    llm = llm,
-    embed_model = embed_model,
-    chunk_size=256)
-
-    set_global_service_context(service_context)
-
     with st.sidebar:
-        st.subheader('Upload Your PDF File')
-        docs = st.file_uploader('⬆️ Upload your PDF & Click to process',
-                                accept_multiple_files = False,
-                                type=['pdf'])
-        if st.button('Process'):
-            with NamedTemporaryFile(dir='.', suffix='.pdf') as f:
-                f.write(docs.getbuffer())
-                with st.spinner('Processing'):
-                    documents = SimpleDirectoryReader(".").load_data()
+        st.subheader("Upload Your PDF File")
+        docs = st.file_uploader("⬆️ Upload your PDF & Click to process",
+                                accept_multiple_files=False, type=["pdf"])
+        if st.button("Process") and docs:
+            with st.spinner("Processing..."):
+                service_context = build_service_context()
+                with tempfile.TemporaryDirectory() as tmp_dir:
+                    tmp_file = os.path.join(tmp_dir, docs.name)
+                    with open(tmp_file, "wb") as f:
+                        f.write(docs.getbuffer())
+                    documents = SimpleDirectoryReader(tmp_dir).load_data()
                     index = VectorStoreIndex.from_documents(documents,
                                                             service_context=service_context)
-                    query_engine = index.as_query_engine()
-                    if "query_engine" not in st.session_state:
-                        st.session_state.query_engine = query_engine
+                    st.session_state.query_engine = index.as_query_engine()
                     st.session_state.activate_chat = True
+            st.success("✅ PDF processed! Ask your questions.")
 
-    if st.session_state.activate_chat == True:
+    if st.session_state.activate_chat:
         if prompt := st.chat_input("Ask your question from the PDF?"):
-            with st.chat_message("user", avatar = '👨🏻'):
+            with st.chat_message("user", avatar="👨🏻"):
                 st.markdown(prompt)
-            st.session_state.messages.append({"role": "user",
-                                              "avatar" :'👨🏻',
-                                              "content": prompt})
+            st.session_state.messages.append({"role": "user", "avatar": "👨🏻", "content": prompt})
 
-            query_index_placeholder = st.session_state.query_engine
-            pdf_response = query_index_placeholder.query(prompt)
+            pdf_response = st.session_state.query_engine.query(prompt)
             cleaned_response = pdf_response.response
-            with st.chat_message("assistant", avatar='🤖'):
+            with st.chat_message("assistant", avatar="🤖"):
                 st.markdown(cleaned_response)
-            st.session_state.messages.append({"role": "assistant",
-                                              "avatar" :'🤖',
-                                              "content": cleaned_response})
-        else:
-            st.markdown('Upload your PDFs to chat')
+            st.session_state.messages.append({"role": "assistant", "avatar": "🤖", "content": cleaned_response})
+    else:
+        st.info("⬅️ Upload a PDF from the sidebar to start chatting.")
 
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
