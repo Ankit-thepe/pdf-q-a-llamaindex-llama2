@@ -1,5 +1,5 @@
 streamlit
-cassandra-driver
+cassandra-driver==3.28.0
 cassio>=0.1.1
 gradientai
 llama-index==0.8.69
